@@ -33,11 +33,20 @@ func (e *Exchange) UpdateLeverage(
 		Leverage: leverage,
 	}
 
-	var result UserState
-	if err := e.executeAction(ctx, action, &result); err != nil {
+	var res *APIResponse[UserState]
+	if err := e.executeAction(ctx, action, &res); err != nil {
 		return nil, err
 	}
-	return &result, nil
+	// The exchange rejects business errors with HTTP 200 + status:"err";
+	// decoding straight into UserState silently swallowed them and reported
+	// success on rejected actions.
+	if res == nil || !res.Ok {
+		if res != nil && res.Err != "" {
+			return nil, fmt.Errorf("%s", res.Err)
+		}
+		return nil, fmt.Errorf("updateLeverage rejected")
+	}
+	return &res.Data, nil
 }
 
 func (e *Exchange) UpdateIsolatedMargin(
@@ -61,11 +70,20 @@ func (e *Exchange) UpdateIsolatedMargin(
 		Ntli:  int64(math.Round(amount * 1e6)),
 	}
 
-	var result UserState
-	if err := e.executeAction(ctx, action, &result); err != nil {
+	var res *APIResponse[UserState]
+	if err := e.executeAction(ctx, action, &res); err != nil {
 		return nil, err
 	}
-	return &result, nil
+	// Same envelope semantics as UpdateLeverage: insufficient balance, cross-
+	// margin positions etc. come back as HTTP 200 + status:"err" and must not
+	// decode into a zero UserState that looks like success.
+	if res == nil || !res.Ok {
+		if res != nil && res.Err != "" {
+			return nil, fmt.Errorf("%s", res.Err)
+		}
+		return nil, fmt.Errorf("updateIsolatedMargin rejected")
+	}
+	return &res.Data, nil
 }
 
 // SlippagePrice calculates the slippage price for market orders
