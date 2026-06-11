@@ -15,6 +15,29 @@ import (
 	"github.com/ethereum/go-ethereum/signer/core/apitypes"
 )
 
+// actionAck mirrors the bare exchange action envelope. Plain actions ack
+// success as {"status":"ok","response":{"type":"default"}} with NO data
+// payload, so APIResponse[T] (which requires response.data on ok) cannot
+// decode them — that requirement broke UpdateLeverage on every successful
+// call ("missing response.data field in successful response").
+type actionAck struct {
+	Status   string          `json:"status"`
+	Response json.RawMessage `json:"response"`
+}
+
+// rejection returns the exchange's error for a non-ok ack, nil otherwise.
+func (a *actionAck) rejection(fallback string) error {
+	if a.Status == "ok" {
+		return nil
+	}
+	var msg string
+	_ = json.Unmarshal(a.Response, &msg) // err acks carry a string response
+	if msg == "" {
+		msg = fallback
+	}
+	return fmt.Errorf("%s", msg)
+}
+
 func (e *Exchange) UpdateLeverage(
 	ctx context.Context,
 	leverage int,
@@ -33,20 +56,16 @@ func (e *Exchange) UpdateLeverage(
 		Leverage: leverage,
 	}
 
-	var res *APIResponse[UserState]
-	if err := e.executeAction(ctx, action, &res); err != nil {
+	// The exchange rejects business errors with HTTP 200 + status:"err";
+	// success acks carry no user state — validate the envelope only.
+	var ack actionAck
+	if err := e.executeAction(ctx, action, &ack); err != nil {
 		return nil, err
 	}
-	// The exchange rejects business errors with HTTP 200 + status:"err";
-	// decoding straight into UserState silently swallowed them and reported
-	// success on rejected actions.
-	if res == nil || !res.Ok {
-		if res != nil && res.Err != "" {
-			return nil, fmt.Errorf("%s", res.Err)
-		}
-		return nil, fmt.Errorf("updateLeverage rejected")
+	if err := ack.rejection("updateLeverage rejected"); err != nil {
+		return nil, err
 	}
-	return &res.Data, nil
+	return &UserState{}, nil
 }
 
 func (e *Exchange) UpdateIsolatedMargin(
@@ -70,20 +89,17 @@ func (e *Exchange) UpdateIsolatedMargin(
 		Ntli:  int64(math.Round(amount * 1e6)),
 	}
 
-	var res *APIResponse[UserState]
-	if err := e.executeAction(ctx, action, &res); err != nil {
-		return nil, err
-	}
 	// Same envelope semantics as UpdateLeverage: insufficient balance, cross-
 	// margin positions etc. come back as HTTP 200 + status:"err" and must not
 	// decode into a zero UserState that looks like success.
-	if res == nil || !res.Ok {
-		if res != nil && res.Err != "" {
-			return nil, fmt.Errorf("%s", res.Err)
-		}
-		return nil, fmt.Errorf("updateIsolatedMargin rejected")
+	var ack actionAck
+	if err := e.executeAction(ctx, action, &ack); err != nil {
+		return nil, err
 	}
-	return &res.Data, nil
+	if err := ack.rejection("updateIsolatedMargin rejected"); err != nil {
+		return nil, err
+	}
+	return &UserState{}, nil
 }
 
 // SlippagePrice calculates the slippage price for market orders
